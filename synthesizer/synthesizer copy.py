@@ -66,17 +66,27 @@ def run_cmd(cmd, time_out=10):
     return ret, out
 
 def get_random_int(int_type:str, get_max:bool=False, get_max_and_min:bool=False) -> int:
-    with AI:
-        a_min: int
-        a_max: int
-        a_min, a_max = AI.execute(
-            "You will be given an integer type, covering different types of"
-            " bit lens and may be unsigned or signed. "
-            "Return the min and max value of integer type {} (tuple[int]). "
-            "If given `int`, treat it as int32_t (signed 32bit integer). "
-            "Otherwise, return (0,0)",
-            int_type
-        )
+    match int_type:
+        case 'uint8_t':
+            a_min, a_max = 0, 255
+        case 'int8_t':
+            a_min, a_max = -128, 127
+        case 'uint16_t':
+            a_min, a_max = 0, 65536
+        case 'int16_t':
+            a_min, a_max = -32768, 32767
+        case 'uint32_t':
+            a_min, a_max = 0, 4294967295
+        case 'int32_t':
+            a_min, a_max = -2147483648, 2147483647
+        case 'uint64_t':
+            a_min, a_max = 0, 18446744073709551615
+        case 'int64_t':
+            a_min, a_max = -9223372036854775808, 9223372036854775807
+        case 'int':
+            a_min, a_max = -2147483648, 2147483647
+        case _:
+            a_min, a_max = 0, 0
     if get_max_and_min:
         return a_min, a_max
     if get_max:
