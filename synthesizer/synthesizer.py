@@ -67,13 +67,11 @@ def run_cmd(cmd, time_out=10):
 
 def get_random_int(int_type:str, get_max:bool=False, get_max_and_min:bool=False) -> int:
     with AI:
-        a_min: int
-        a_max: int
         a_min, a_max = AI.execute(
             "You will be given an integer type, covering different types of"
             " bit lens and may be unsigned or signed. "
-            "Return the min and max value of integer type {} (tuple[int]). "
-            "If given `int`, treat it as int32_t (signed 32bit integer). "
+            "Return the min and max value of integer type {} (two integer as `tuple[int]`). "
+            "If given string `int`, treat it as int32_t (signed 32bit integer). "
             "Otherwise, return (0,0)",
             int_type
         )
@@ -125,7 +123,7 @@ def get_primitive_type(int_type:str) -> str:
 
 def parse_int_values(log: str):
     """
-    解析日志中所有 INT:ID:start:end:step 信息，
+    解析日志中所有 INT:ID:start:end 信息，
     返回 int_values 字典和重复访问的 ID 列表。
     """
     matches = re.findall(r'INT:([\-\d]+):([\-\d]+):([\-\d]+)', log)
@@ -139,6 +137,17 @@ def parse_int_values(log: str):
         int_values[key] = value
     return int_values, int_values_repeat
 
+def parse_int_values_ai(log: str):
+    with AI:
+        int_values, int_values_repeat = AI.execute(
+            "You will be given a log containing lines like `INT:ID:start:end`"
+            r"You should use regex to extract (vid, start, end) tuple and build dict with key=f`ID{vid}` and value=(start, end). "
+            "If the key repeats and value is different, update the value and add the key to the repeat list. "
+            "The return format is (dict[str, tuple[int, int]], list[str]). ",
+            log
+        )
+    return int_values, int_values_repeat
+    
 def parse_ptr_values(log: str):
     """
     解析日志中所有 PTR:ID:addr 信息，
@@ -152,6 +161,17 @@ def parse_ptr_values(log: str):
         if key in ptr_values:
             ptr_values_repeat.append(key)
         ptr_values[key] = addr
+    return ptr_values, ptr_values_repeat
+
+def parse_ptr_values_ai(log: str):
+    with AI:
+        ptr_values, ptr_values_repeat = AI.execute(
+            "You will be given a log containing lines like `PTR:ID:addr`"
+            r"You should use regex to extract (vid, addr) tuple and build dict with key=f`ID\{vid}` and value=addr. "
+            "If the key repeats and value is different, update the value and add the key to the repeat list. "
+            "The return format is (dict[str, str], list[str]). ",
+            log
+        )
     return ptr_values, ptr_values_repeat
 
 def parse_mem_info(log: str):
@@ -202,7 +222,32 @@ def parse_mem_info(log: str):
 
     return mem_range_global, mem_range_local, mem_values, mem_values_repeat
 
+def parse_mem_info_ai(log: str):
+    with AI:
+        res = AI.execute(r"""
+Please implement a Python function `analyze_memory(log: str) -> Tuple[Dict[int, int], List[List[int]], Dict[str, List[Any]], List[str]]` with the following requirements:
 
+1. Use a regular expression on the string `log` to extract all global memory ranges:
+
+   * Pattern: `GLOBAL:<unused>:<hex_start>:<size>`
+   * Build a dictionary `mem_range_global: { start_addr (int) : size (int) }`.
+
+2. Use a regular expression on `log` to extract both local variable ranges and memory‐access records:
+
+   * Local ranges: pattern `LOCAL:<ID>:<hex_start>:<size>`, collected into `mem_range_local: List[[start (int), size (int)]]`.
+   * Access records: pattern `MEM:<ID>:<hex_addr>:<hex_end>`, to be processed one by one.
+
+3. For each `MEM` record, compute:
+
+   * `access_mem = int(hex_addr, 16)`
+   * `access_size = int(hex_end, 16) - access_mem`
+   * Determine its containing region by first matching against `mem_range_global`, then (if no match) in reverse order against `mem_range_local`. Record the region’s `head` and `size`, and flags `is_global` and `is_local`.
+   * Store in a dictionary `mem_values: { "ID<ID>": [access_mem, access_size, head, size, is_global, is_local] }`; if the same ID was seen before at a different address, add that ID to the list `mem_values_repeat`.
+
+4. Return the tuple `(mem_range_global, mem_range_local, mem_values, mem_values_repeat)`.
+"""
+            , log)
+    return res
 
 class InstrumentType(Enum):
     FUNCTIONENTER   = auto()
@@ -310,15 +355,14 @@ class Synthesizer:
             raise InstrumentError(f"Run instrumented file failed : {out}.")
         self.alive_sites = [ f'ID{x}' for x in re.findall(r'INST:(\d+)', out)]
         if has_overlap([TargetUB.IntegerOverflow, TargetUB.DivideZero], ALL_TARGET_UB):
-            self.int_values, self.int_values_repeat = parse_int_values(out)
+            self.int_values, self.int_values_repeat = parse_int_values_ai(out)
         if has_overlap([TargetUB.NullPtrDeref], ALL_TARGET_UB):
-            self.ptr_values, self.ptr_values_repeat   = parse_ptr_values(out)
-        
+            self.ptr_values, self.ptr_values_repeat   = parse_ptr_values_ai(out)
         if has_overlap([TargetUB.BufferOverflow, TargetUB.OutBound], ALL_TARGET_UB) > 0:
             (self.mem_range_global,
             self.mem_range_local,
             self.mem_values,
-            self.mem_values_repeat) = parse_mem_info(out)
+            self.mem_values_repeat) = parse_mem_info_ai(out)
 
         # 5. static analysis: analyze all instrumentation sites
         with open(filename, 'r') as f:
