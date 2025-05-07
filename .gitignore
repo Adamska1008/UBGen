@@ -1,0 +1,5 @@
+mutants
+csmith_install
+*/__pycache__/**
+*/build/**
+platform.info

@@ -34,15 +34,23 @@ def string_to_targetub(ub_str: str) -> TargetUB:
 
 def install_csmith():
     csmith_home = Path(__file__).parent / "csmith_install"
-    with NamedTemporaryFile(suffix=".zip", mode="rb", delete=True) as f, TemporaryDirectory() as csmith_src:
-        csmith_src_zip = f.name
-        response = requests.get("https://github.com/csmith-project/csmith/archive/refs/tags/csmith-2.3.0.zip")
-        if response.status_code == 200:
-            with open(csmith_src_zip, "wb") as f:
-                f.write(response.content)
-        with zipfile.ZipFile(csmith_src_zip, "r") as zip_ref:
-            zip_ref.extractall(csmith_src)
-        os.system(f'cd {csmith_src}/csmith-csmith-2.3.0/ && cmake -DCMAKE_INSTALL_PREFIX={csmith_home} . && make -j4 && make install')
+    csmith_home.mkdir(exist_ok=True)
+    url = "https://codeload.github.com/csmith-project/csmith/zip/refs/tags/csmith-2.3.0"
+
+    with NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        # 加上 User-Agent 模拟浏览器，有时候更保险
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, stream=True)
+        resp.raise_for_status()
+        for chunk in resp.iter_content(chunk_size=8192):
+            tmp.write(chunk)
+        tmp_path = tmp.name
+
+    with TemporaryDirectory() as srcdir:
+        with zipfile.ZipFile(tmp_path, "r") as z:
+            z.extractall(srcdir)
+        src_sub = next(Path(srcdir).iterdir())  # 解压后会是 csmith-csmith-2.3.0 目录
+        os.system(f"cd {src_sub} && cmake -DCMAKE_INSTALL_PREFIX={csmith_home} . && make -j4 && make install")
 
 def check_available_csmith() -> bool:
     csmith_home = Path(__file__).parent / "csmith_install"
