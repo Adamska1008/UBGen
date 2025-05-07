@@ -123,6 +123,86 @@ def get_primitive_type(int_type:str) -> str:
         case 'unsigned long'|'uint64_t':
             return 'uint64_t'
 
+def parse_int_values(log: str):
+    """
+    解析日志中所有 INT:ID:start:end:step 信息，
+    返回 int_values 字典和重复访问的 ID 列表。
+    """
+    matches = re.findall(r'INT:([\-\d]+):([\-\d]+):([\-\d]+)', log)
+    int_values = {}
+    int_values_repeat = []
+    for vid, start, step in matches:
+        key = f'ID{vid}'
+        value = (start, step)
+        if key in int_values and int_values[key] != value:
+            int_values_repeat.append(key)
+        int_values[key] = value
+    return int_values, int_values_repeat
+
+def parse_ptr_values(log: str):
+    """
+    解析日志中所有 PTR:ID:addr 信息，
+    返回 ptr_values 字典和重复访问的 ID 列表。
+    """
+    matches = re.findall(r'PTR:([\-\d]+):([\-\w]+)', log)
+    ptr_values = {}
+    ptr_values_repeat = []
+    for vid, addr in matches:
+        key = f'ID{vid}'
+        if key in ptr_values:
+            ptr_values_repeat.append(key)
+        ptr_values[key] = addr
+    return ptr_values, ptr_values_repeat
+
+def parse_mem_info(log: str):
+    """
+    解析日志中 GLOBAL 和 LOCAL/MEM 信息，
+    返回 mem_range_global, mem_range_local, mem_values, mem_values_repeat。
+    """
+    # 全局范围
+    global_matches = re.findall(r'GLOBAL:([\-|\d]+):([\-|\w]+):([\-|\d]+)', log)
+    mem_range_global = {int(addr, 16): int(size) for _, addr, size in global_matches}
+
+    # 本地/内存访问
+    values_matches = re.findall(r'(LOCAL|MEM):([\-|\d]+):([\-|\w]+):([\-|\w]+)', log)
+    mem_range_local = []
+    mem_values = {}
+    mem_values_repeat = []
+
+    for kind, vid, addr_hex, end_hex in values_matches:
+        key = f'ID{vid}'
+        addr = int(addr_hex, 16)
+        size = int(end_hex, 16) - addr
+
+        if kind == 'LOCAL':
+            mem_range_local.append([addr, size])
+            continue
+
+        # 默认块信息
+        tgt_head, tgt_size = addr, size
+        is_global = False
+        for head, sz in mem_range_global.items():
+            if head <= addr <= head + sz - size:
+                tgt_head, tgt_size = head, sz
+                is_global = True
+                break
+
+        is_local = False
+        if not is_global:
+            for head, sz in reversed(mem_range_local):
+                if head <= addr <= head + sz - size:
+                    tgt_head, tgt_size = head, sz
+                    is_local = True
+                    break
+
+        if key in mem_values and mem_values[key][0] != addr:
+            mem_values_repeat.append(key)
+
+        mem_values[key] = [addr, size, tgt_head, tgt_size, is_global, is_local]
+
+    return mem_range_global, mem_range_local, mem_values, mem_values_repeat
+
+
 
 class InstrumentType(Enum):
     FUNCTIONENTER   = auto()
@@ -230,61 +310,15 @@ class Synthesizer:
             raise InstrumentError(f"Run instrumented file failed : {out}.")
         self.alive_sites = [ f'ID{x}' for x in re.findall(r'INST:(\d+)', out)]
         if has_overlap([TargetUB.IntegerOverflow, TargetUB.DivideZero], ALL_TARGET_UB):
-            int_values_ori = re.findall(r'INT:([\-|\d]+):([\-|\d]+):([\-|\d]+)', out)
-            self.int_values = {}
-            self.int_values_repeat = []
-            for int_v in int_values_ori:
-                if f'ID{int_v[0]}' in self.int_values:
-                    if int_v[1:] != self.int_values[f'ID{int_v[0]}']:
-                        self.int_values_repeat.append(f'ID{int_v[0]}')
-                self.int_values[f'ID{int_v[0]}'] = int_v[1:]
+            self.int_values, self.int_values_repeat = parse_int_values(out)
         if has_overlap([TargetUB.NullPtrDeref], ALL_TARGET_UB):
-            ptr_values_ori = re.findall(r'PTR:([\-|\d]+):([\-|\w]+)', out)
-            self.ptr_values = {}
-            self.ptr_values_repeat = []
-            for ptr_v in ptr_values_ori:
-                if f'ID{ptr_v[0]}' in self.ptr_values:
-                    self.ptr_values_repeat.append(f'ID{ptr_v[0]}')
-                self.ptr_values[f'ID{ptr_v[0]}'] = ptr_v[1]
+            self.ptr_values, self.ptr_values_repeat   = parse_ptr_values(out)
         
         if has_overlap([TargetUB.BufferOverflow, TargetUB.OutBound], ALL_TARGET_UB) > 0:
-            mem_range_ori = re.findall(r'GLOBAL:([\-|\d]+):([\-|\w]+):([\-|\d]+)', out)
-            self.mem_range_global = {}
-            for mem_v in mem_range_ori:
-                self.mem_range_global[int(mem_v[1], 16)] = int(mem_v[2])
-
-            mem_values_ori = re.findall(r'(LOCAL|MEM):([\-|\d]+):([\-|\w]+):([\-|\w]+)', out)
-            self.mem_range_local = []
-            self.mem_values = {}
-            self.mem_values_repeat = [] # record all mem_values indexs that have more than 1 access with different values
-            for mem_v in mem_values_ori:
-                if mem_v[0] == "LOCAL":
-                    self.mem_range_local.append([int(mem_v[2], 16),int(mem_v[3])])
-                    continue
-                access_mem = int(mem_v[2], 16)
-                access_size = int(mem_v[3], 16) - access_mem
-                tgt_mem_head, tgt_mem_size = access_mem, access_size
-                is_global = False
-                for mem_head in self.mem_range_global:
-                    if mem_head <= access_mem <= mem_head + self.mem_range_global[mem_head]-access_size:
-                        tgt_mem_head = mem_head
-                        tgt_mem_size = self.mem_range_global[mem_head]
-                        is_global = True
-                        break
-                is_local = False
-                if not is_global:
-                    for mem_i in range(len(self.mem_range_local)-1, -1, -1):
-                        mem_head, mem_size = self.mem_range_local[mem_i][0], self.mem_range_local[mem_i][1]
-                        if mem_head <= access_mem <= mem_head + mem_size-access_size:
-                            tgt_mem_head = mem_head
-                            tgt_mem_size = mem_size
-                            is_local = True
-                            break
-                if f'ID{mem_v[1]}' in self.mem_values: # record all mem_values that have more than 1 unique access address
-                    if access_mem != self.mem_values[f'ID{mem_v[1]}'][0]:
-                        self.mem_values_repeat.append(f'ID{mem_v[1]}')
-                self.mem_values[f'ID{mem_v[1]}'] = [access_mem, access_size, tgt_mem_head, tgt_mem_size, is_global, is_local]
-
+            (self.mem_range_global,
+            self.mem_range_local,
+            self.mem_values,
+            self.mem_values_repeat) = parse_mem_info(out)
 
         # 5. static analysis: analyze all instrumentation sites
         with open(filename, 'r') as f:
