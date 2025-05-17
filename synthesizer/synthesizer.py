@@ -265,6 +265,40 @@ class InstrumentType(Enum):
     VARREF_FREE     = auto()
     VARREF_INIT     = auto()
 
+def compute_available_ubs(
+    tgt_ins_type: InstrumentType,
+    tgt_var_type: str,
+    tgt_var_name: str,
+    heap_vars: tuple[list[str], list[int]]
+) -> list[TargetUB]:
+    """
+    根据给定的 InstrumentType、变量类型、变量名和堆变量信息，
+    返回该位置可触发的所有 TargetUB 列表。
+    """
+    ubs: list[TargetUB] = []
+
+    if tgt_ins_type == InstrumentType.VARREF_POINTER:
+        if '*' in tgt_var_type.strip():
+            ubs.append(TargetUB.NullPtrDeref)
+            if '[' not in tgt_var_type:
+                ubs.append(TargetUB.UseAfterScope)
+        if tgt_var_name in heap_vars[0]:
+            ubs.append(TargetUB.UseAfterFree)
+
+    elif tgt_ins_type == InstrumentType.VARREF_MEMORY:
+        ubs.extend([TargetUB.BufferOverflow, TargetUB.OutBound])
+
+    elif tgt_ins_type == InstrumentType.VARREF_INTEGER:
+        ubs.extend([TargetUB.IntegerOverflow, TargetUB.DivideZero])
+
+    elif tgt_ins_type == InstrumentType.VARREF_FREE:
+        ubs.extend([TargetUB.DoubleFree, TargetUB.MemoryLeak])
+
+    elif tgt_ins_type == InstrumentType.VARREF_INIT:
+        ubs.append(TargetUB.UseUninit)
+
+    return ubs
+
 class ScopeTree:
     def __init__(self, id) -> None:
         self.parent = None
@@ -487,26 +521,12 @@ class Synthesizer:
         tgt_var_name = tgt_var_name[0]
 
         # available UBs for the selected_var
-        AVAIL_UB = []
-        if tgt_ins_type == InstrumentType.VARREF_POINTER:
-            if '*' in tgt_var_type.strip():
-                AVAIL_UB.append(TargetUB.NullPtrDeref)
-                if '[' not in tgt_var_type:
-                    # don't assign to immutable arr: {int a[1]; int *b; a=b;}
-                    AVAIL_UB.append(TargetUB.UseAfterScope)
-            if tgt_var_name in self.heap_vars[0]:
-                AVAIL_UB.append(TargetUB.UseAfterFree)
-        if tgt_ins_type ==  InstrumentType.VARREF_MEMORY:
-            AVAIL_UB.append(TargetUB.BufferOverflow)
-            AVAIL_UB.append(TargetUB.OutBound)
-        if tgt_ins_type == InstrumentType.VARREF_INTEGER:
-            AVAIL_UB.append(TargetUB.IntegerOverflow)
-            AVAIL_UB.append(TargetUB.DivideZero)
-        if tgt_ins_type == InstrumentType.VARREF_FREE:
-            AVAIL_UB.append(TargetUB.DoubleFree)
-            AVAIL_UB.append(TargetUB.MemoryLeak)
-        if tgt_ins_type == InstrumentType.VARREF_INIT:
-            AVAIL_UB.append(TargetUB.UseUninit)
+        AVAIL_UB = compute_available_ubs(
+            tgt_ins_type,
+            tgt_var_type,
+            tgt_var_name,
+            self.heap_vars
+        )
 
         # candidate UBs among the given target UBs
         CAND_TARGET_UB = []
